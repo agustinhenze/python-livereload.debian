@@ -1,0 +1,3 @@
+version=3
+
+https://github.com/lepture/python-livereload/tags .*archive\/v?([0-9.]*).tar.gz
