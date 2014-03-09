@@ -1,37 +1,36 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import os
-ROOT = os.path.dirname(__file__)
+import re
+from setuptools import setup
 
-import sys
-kwargs = {}
-kwargs['include_package_data'] = True
-major, minor = sys.version_info[:2]
-if major >= 3:
-    kwargs['use_2to3'] = True
 
-from setuptools import setup, find_packages
-import livereload
-from email.utils import parseaddr
-author, author_email = parseaddr(livereload.__author__)
+def fread(filepath):
+    with open(filepath, 'r') as f:
+        return f.read()
+
+
+def version():
+    content = fread('livereload/__init__.py')
+    pattern = r"__version__ = '([0-9\.]*)'"
+    m = re.findall(pattern, content)
+    return m[0]
+
 
 setup(
     name='livereload',
-    version=livereload.__version__,
-    author=author,
-    author_email=author_email,
-    url=livereload.__homepage__,
-    packages=find_packages(),
+    version=version(),
+    author='Hsiaoming Yang',
+    author_email='me@lepture.com',
+    url='https://github.com/lepture/python-livereload',
+    packages=['livereload'],
     description='Python LiveReload is an awesome tool for web developers',
-    long_description=livereload.__doc__,
-    entry_points={
-        'console_scripts': ['livereload= livereload.cli:main'],
-    },
+    long_description=fread('README.rst'),
     install_requires=[
-        'tornado', 'docopt',
+        'tornado',
     ],
-    license=open(os.path.join(ROOT, 'LICENSE')).read(),
+    license='BSD',
+    include_package_data=True,
     classifiers=[
         'Development Status :: 4 - Beta',
         'Environment :: Console',
@@ -43,11 +42,11 @@ setup(
         'Operating System :: POSIX :: Linux',
         'Programming Language :: Python :: 2.6',
         'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: 3.3',
         'Programming Language :: Python :: Implementation :: CPython',
         'Programming Language :: Python :: Implementation :: PyPy',
         'Topic :: Software Development :: Build Tools',
         'Topic :: Software Development :: Compilers',
         'Topic :: Software Development :: Debuggers',
-    ],
-    **kwargs
+    ]
 )
