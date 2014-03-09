@@ -1,230 +1,202 @@
 # -*- coding: utf-8 -*-
+"""
+    livereload.server
+    ~~~~~~~~~~~~~~~~~
 
-"""livereload.app
+    WSGI app server for livereload.
 
-Core Server of LiveReload.
+    :copyright: (c) 2013 by Hsiaoming Yang
 """
 
 import os
 import logging
-import time
-import mimetypes
-import webbrowser
-import hashlib
-from tornado import ioloop
+from subprocess import Popen, PIPE
 from tornado import escape
-from tornado import websocket
-from tornado.web import RequestHandler, Application
-from tornado.util import ObjectDict
-try:
-    from tornado.log import enable_pretty_logging
-except ImportError:
-    from tornado.options import enable_pretty_logging
-from livereload.task import Task
+from tornado.wsgi import WSGIContainer
+from tornado.ioloop import IOLoop
+from tornado.web import Application, FallbackHandler
+from .handlers import LiveReloadHandler, LiveReloadJSHandler
+from .handlers import ForceReloadHandler, StaticHandler
+from .watcher import Watcher
+from ._compat import text_types
+from tornado.log import enable_pretty_logging
+enable_pretty_logging()
 
 
-PORT = 35729
-ROOT = '.'
-LIVERELOAD = os.path.join(
-    os.path.abspath(os.path.dirname(__file__)),
-    'livereload.js',
-)
+def shell(command, output=None, mode='w'):
+    """Command shell command.
 
+    You can add a shell command::
 
-class LiveReloadHandler(websocket.WebSocketHandler):
-    waiters = set()
-    _last_reload_time = None
+        server.watch('style.less', shell('lessc style.less', output='style.css'))
 
-    def allow_draft76(self):
-        return True
+    :param command: a shell command
+    :param output: output stdout to the given file
+    :param mode: only works with output, mode ``w`` means write,
+                 mode ``a`` means append
+    """
+    if not output:
+        output = os.devnull
+    else:
+        folder = os.path.dirname(output)
+        if folder and not os.path.isdir(folder):
+            os.makedirs(folder)
 
-    def on_close(self):
-        if self in LiveReloadHandler.waiters:
-            LiveReloadHandler.waiters.remove(self)
+    cmd = command.split()
 
-    def send_message(self, message):
-        if isinstance(message, dict):
-            message = escape.json_encode(message)
-
+    def run_shell():
         try:
-            self.write_message(message)
-        except:
-            logging.error('Error sending message', exc_info=True)
+            p = Popen(cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+        except OSError as e:
+            logging.error(e)
+            if e.errno == os.errno.ENOENT:  # file (command) not found
+                logging.error("maybe you haven't installed %s", cmd[0])
+            return e
+        stdout, stderr = p.communicate()
+        if stderr:
+            logging.error(stderr)
+            return stderr
+        #: stdout is bytes, decode for python3
+        code = stdout.decode()
+        with open(output, mode) as f:
+            f.write(code)
 
-    def poll_tasks(self):
-        changes = Task.watch()
-        if not changes:
-            return
-        self.watch_tasks()
-
-    def watch_tasks(self):
-        if time.time() - self._last_reload_time < 3:
-            # if you changed lot of files in one time
-            # it will refresh too many times
-            logging.info('ignore this reload action')
-            return
-
-        logging.info('Reload %s waiters', len(self.waiters))
-
-        msg = {
-            'command': 'reload',
-            'path': Task.last_modified or '*',
-            'liveCSS': True
-        }
-
-        self._last_reload_time = time.time()
-        for waiter in LiveReloadHandler.waiters:
-            try:
-                waiter.write_message(msg)
-            except:
-                logging.error('Error sending message', exc_info=True)
-                LiveReloadHandler.waiters.remove(waiter)
-
-    def on_message(self, message):
-        """Handshake with livereload.js
-
-        1. client send 'hello'
-        2. server reply 'hello'
-        3. client send 'info'
-
-        http://help.livereload.com/kb/ecosystem/livereload-protocol
-        """
-        message = ObjectDict(escape.json_decode(message))
-        if message.command == 'hello':
-            handshake = {}
-            handshake['command'] = 'hello'
-            protocols = message.protocols
-            protocols.append(
-                'http://livereload.com/protocols/2.x-remote-control'
-            )
-            handshake['protocols'] = protocols
-            handshake['serverName'] = 'livereload-tornado'
-            self.send_message(handshake)
-
-        if message.command == 'info' and 'url' in message:
-            logging.info('Browser Connected: %s' % message.url)
-            LiveReloadHandler.waiters.add(self)
-            if not LiveReloadHandler._last_reload_time:
-                if os.path.exists('Guardfile'):
-                    logging.info('Reading Guardfile')
-                    execfile('Guardfile', {})
-                else:
-                    logging.info('No Guardfile')
-                    Task.add(os.getcwd())
-
-                LiveReloadHandler._last_reload_time = time.time()
-                logging.info('Start watching changes')
-                if not Task.start(self.watch_tasks):
-                    ioloop.PeriodicCallback(self.poll_tasks, 800).start()
+    return run_shell
 
 
-class IndexHandler(RequestHandler):
+class WSGIWrapper(WSGIContainer):
+    """Insert livereload scripts into response body."""
 
-    def get(self, path='/'):
-        abspath = os.path.join(os.path.abspath(ROOT), path.lstrip('/'))
-        mime_type, encoding = mimetypes.guess_type(abspath)
-        if not mime_type:
-            mime_type = 'text/html'
+    def __call__(self, request):
+        data = {}
+        response = []
 
-        self.mime_type = mime_type
-        self.set_header('Content-Type', mime_type)
-        self.read_path(abspath)
+        def start_response(status, response_headers, exc_info=None):
+            data["status"] = status
+            data["headers"] = response_headers
+            return response.append
+        app_response = self.wsgi_application(
+            WSGIContainer.environ(request), start_response)
+        try:
+            response.extend(app_response)
+            body = b"".join(response)
+        finally:
+            if hasattr(app_response, "close"):
+                app_response.close()
+        if not data:
+            raise Exception("WSGI app did not call start_response")
 
-    def inject_livereload(self):
-        if self.mime_type != 'text/html':
-            return
-        ua = self.request.headers.get('User-Agent', 'bot').lower()
-        if 'msie' not in ua:
-            self.write('<script src="/livereload.js"></script>')
-
-    def read_path(self, abspath):
-        filepath = abspath
-        if os.path.isdir(filepath):
-            filepath = os.path.join(abspath, 'index.html')
-            if not os.path.exists(filepath):
-                self.create_index(abspath)
-                return
-        elif not os.path.exists(abspath):
-            filepath = abspath + '.html'
-
-        if os.path.exists(filepath):
-            if self.mime_type == 'text/html':
-                f = open(filepath)
-                data = f.read()
-                f.close()
-                before, after = data.split('</head>')
-                self.write(before)
-                self.inject_livereload()
-                self.write('</head>')
-                self.write(after)
-            else:
-                f = open(filepath, 'rb')
-                data = f.read()
-                f.close()
-                self.write(data)
-
-            hasher = hashlib.sha1()
-            hasher.update(data)
-            self.set_header('Etag', '"%s"' % hasher.hexdigest())
-            return
-        self.send_error(404)
-        return
-
-    def create_index(self, root):
-        self.inject_livereload()
-        files = os.listdir(root)
-        self.write('<ul>')
-        for f in files:
-            path = os.path.join(root, f)
-            self.write('<li>')
-            if os.path.isdir(path):
-                self.write('<a href="%s/">%s</a>' % (f, f))
-            else:
-                self.write('<a href="%s">%s</a>' % (f, f))
-            self.write('</li>')
-
-        self.write('</ul>')
-
-
-class LiveReloadJSHandler(RequestHandler):
-    def get(self):
-        f = open(LIVERELOAD)
-        self.set_header('Content-Type', 'application/javascript')
-        for line in f:
-            if '{{port}}' in line:
-                line = line.replace('{{port}}', str(PORT))
-            self.write(line)
-        f.close()
-
-handlers = [
-    (r'/livereload', LiveReloadHandler),
-    (r'/livereload.js', LiveReloadJSHandler),
-    (r'(.*)', IndexHandler),
-]
-
-
-def start(port=35729, root='.', autoraise=False):
-    global PORT
-    PORT = port
-    global ROOT
-    if root is None:
-        root = '.'
-    ROOT = root
-    logging.getLogger().setLevel(logging.INFO)
-    enable_pretty_logging()
-    app = Application(handlers=handlers)
-    app.listen(port)
-    print('Serving path %s on 127.0.0.1:%s' % (root, port))
-
-    if autoraise:
-        webbrowser.open(
-            'http://127.0.0.1:%s' % port, new=2, autoraise=True
+        status_code = int(data["status"].split()[0])
+        headers = data["headers"]
+        header_set = set(k.lower() for (k, v) in headers)
+        body = escape.utf8(body)
+        body = body.replace(
+            b'</head>',
+            b'<script src="/livereload.js"></script></head>'
         )
-    try:
-        ioloop.IOLoop.instance().start()
-    except KeyboardInterrupt:
-        print('Shutting down...')
+
+        if status_code != 304:
+            if "content-length" not in header_set:
+                headers.append(("Content-Length", str(len(body))))
+            if "content-type" not in header_set:
+                headers.append(("Content-Type", "text/html; charset=UTF-8"))
+        if "server" not in header_set:
+            headers.append(("Server", "livereload-tornado"))
+
+        parts = [escape.utf8("HTTP/1.1 " + data["status"] + "\r\n")]
+        for key, value in headers:
+            if key.lower() == 'content-length':
+                value = str(len(body))
+            parts.append(
+                escape.utf8(key) + b": " + escape.utf8(value) + b"\r\n"
+            )
+        parts.append(b"\r\n")
+        parts.append(body)
+        request.write(b"".join(parts))
+        request.finish()
+        self._log(status_code, request)
 
 
-if __name__ == '__main__':
-    start(8000)
+class Server(object):
+    """Livereload server interface.
+
+    Initialize a server and watch file changes::
+
+        server = Server(wsgi_app)
+        server.serve()
+
+    :param app: a wsgi application instance
+    :param watcher: A Watcher instance, you don't have to initialize
+                    it by yourself
+    """
+    def __init__(self, app=None, watcher=None):
+        self.app = app
+        self.port = 5500
+        self.root = None
+        if not watcher:
+            watcher = Watcher()
+        self.watcher = watcher
+
+    def watch(self, filepath, func=None):
+        """Add the given filepath for watcher list.
+
+        Once you have intialized a server, watch file changes before
+        serve the server::
+
+            server.watch('static/*.stylus', 'make static')
+            def alert():
+                print('foo')
+            server.watch('foo.txt', alert)
+            server.serve()
+
+        :param filepath: files to be watched, it can be a filepath,
+                         a directory, or a glob pattern
+        :param func: the function to be called, it can be a string of
+                     shell command, or any callable object without
+                     parameters
+        """
+        if isinstance(func, text_types):
+            func = shell(func)
+
+        self.watcher.watch(filepath, func)
+
+    def application(self, debug=True):
+        LiveReloadHandler.watcher = self.watcher
+        handlers = [
+            (r'/livereload', LiveReloadHandler),
+            (r'/forcereload', ForceReloadHandler),
+            (r'/livereload.js', LiveReloadJSHandler, dict(port=self.port)),
+        ]
+
+        if self.app:
+            self.app = WSGIWrapper(self.app)
+            handlers.append(
+                (r'.*', FallbackHandler, dict(fallback=self.app))
+            )
+        else:
+            handlers.append(
+                (r'(.*)', StaticHandler, dict(root=self.root or '.')),
+            )
+        return Application(handlers=handlers, debug=debug)
+
+    def serve(self, port=None, host=None, root=None, debug=True):
+        """Start serve the server with the given port.
+
+        :param port: serve on this port, default is 5500
+        :param host: serve on this hostname, default is 0.0.0.0
+        :param root: serve static on this root directory
+        """
+        if root:
+            self.root = root
+        if port:
+            self.port = port
+        if host is None:
+            host = ''
+
+        self.application(debug=debug).listen(self.port, address=host)
+        logging.getLogger().setLevel(logging.INFO)
+        print('Serving on 127.0.0.1:%s' % self.port)
+        try:
+            IOLoop.instance().start()
+        except KeyboardInterrupt:
+            print('Shutting down...')
