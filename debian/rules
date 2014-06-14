@@ -4,6 +4,8 @@
 # Uncomment this to turn on verbose mode.
 #export DH_VERBOSE=1
 
+# TODO build python3 package
+
 PYVERS :=  $(shell pyversions -s)
 UPSTREAM_VERSION := $(shell dpkg-parsechangelog | sed -n -e's/^Version: \(.*\)-[^-]\+/\1/p')
 
@@ -30,13 +32,12 @@ override_dh_auto_install:
 		cd -;
 
 override_dh_installman:
-	env | grep debian
-	echo -e '#!/bin/bash\nPYTHONPATH=.. python -c "from livereload.cli import main; main()" $$@' > debian/livereload
+	echo -e '#!/bin/bash\nPYTHONPATH=$$PWD bin/livereload $$@' > debian/livereload
 	chmod u+x debian/livereload
 	help2man -N \
 		--version-string=$(UPSTREAM_VERSION) \
 		-o debian/livereload.1 \
-		-n "Refresh the browser automatically when a file of your project has been updated." \
+		-n "Automatic browser refresher" \
 		debian/livereload
 	dh_installman debian/livereload.1
 
