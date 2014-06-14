@@ -31,6 +31,8 @@ override_dh_auto_install:
 		sphinx-build -C -b html -Dmaster_doc=index . _build/html; \
 		cd -;
 
+override_dh_auto_test:
+
 override_dh_installman:
 	echo -e '#!/bin/bash\nPYTHONPATH=$$PWD bin/livereload $$@' > debian/livereload
 	chmod u+x debian/livereload
