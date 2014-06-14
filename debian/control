@@ -6,7 +6,6 @@ Build-Depends: debhelper (>= 9),
  python-all,
  python-setuptools,
  python-sphinx (>= 1.0.7+dfsg) | python3-sphinx,
- python-docopt,
  python-tornado,
  help2man,
 Standards-Version: 3.9.5
