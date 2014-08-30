@@ -6,7 +6,6 @@
 
 PYVERS :=  $(shell pyversions -s)
 UPSTREAM_VERSION := $(shell dpkg-parsechangelog | sed -n -e's/^Version: \(.*\)-[^-]\+/\1/p')
-PACKAGE_NAME := $(shell dpkg-parsechangelog -SSource)
 export PYBUILD_NAME=livereload
 export ROOT_PATH=$(CURDIR)
 
@@ -30,7 +29,6 @@ override_dh_auto_install:
 override_dh_auto_test:
 
 override_dh_installman:
-	echo $(PYBUILD_NAME)
 	help2man -N \
 		--version-string=$(UPSTREAM_VERSION) \
 		-o debian/livereload.1 \
