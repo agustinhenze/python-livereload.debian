@@ -4,44 +4,39 @@
 # Uncomment this to turn on verbose mode.
 #export DH_VERBOSE=1
 
-# TODO build python3 package
-
 PYVERS :=  $(shell pyversions -s)
 UPSTREAM_VERSION := $(shell dpkg-parsechangelog | sed -n -e's/^Version: \(.*\)-[^-]\+/\1/p')
+PACKAGE_NAME := $(shell dpkg-parsechangelog -SSource)
+export PYBUILD_NAME=livereload
+export ROOT_PATH=$(CURDIR)
+
 
 %:
-	dh $@ --with python2 --with sphinxdoc
+	dh $@ --with python2,python3,sphinxdoc --buildsystem=pybuild
 
 override_dh_auto_clean:
 	dh_auto_clean --all
-	rm -rf build
-	rm -rf python-livereload.egg-info
 	rm -rf docs/_build
-	rm -f debian/livereload
 	rm -f debian/livereload.1
 
 override_dh_auto_install:
-	set -ex; \
-	for py in $(PYVERS); do \
-		$$py setup.py install --root debian/python-livereload \
-				      --install-layout=deb; \
-	done
+	dh_auto_install
 	set -ex; \
 		cd docs; \
 		sphinx-build -C -b html -Dmaster_doc=index . _build/html; \
 		cd -;
+	rm -r debian/python-livereload/usr/bin
 
 override_dh_auto_test:
 
 override_dh_installman:
-	echo -e '#!/bin/bash\nPYTHONPATH=$$PWD bin/livereload $$@' > debian/livereload
-	chmod u+x debian/livereload
+	echo $(PYBUILD_NAME)
 	help2man -N \
 		--version-string=$(UPSTREAM_VERSION) \
 		-o debian/livereload.1 \
 		-n "Automatic browser refresher" \
 		debian/livereload
-	dh_installman debian/livereload.1
+	dh_installman
 
 get-orig-source:
 	@if [ ! -d "debian" ] ; then \

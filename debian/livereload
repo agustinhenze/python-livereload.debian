@@ -1,0 +1,5 @@
+#!/bin/bash
+
+export PYTHONPATH=${ROOT_PATH}
+
+bin/livereload $@
