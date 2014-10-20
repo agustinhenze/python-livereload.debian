@@ -1,3 +1,10 @@
+python-livereload (2.2.2-1) unstable; urgency=medium
+
+  * Imported Upstream version 2.2.2
+  * Bumped Standard-Version to 3.9.6 (no changes required)
+
+ -- Agustin Henze <tin@debian.org>  Mon, 20 Oct 2014 20:32:27 -0300
+
 python-livereload (2.2.1-1) unstable; urgency=medium
 
   * Imported Upstream version 2.2.1
