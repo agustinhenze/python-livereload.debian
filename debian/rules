@@ -7,7 +7,6 @@
 PYVERS :=  $(shell pyversions -s)
 UPSTREAM_VERSION := $(shell dpkg-parsechangelog | sed -n -e's/^Version: \(.*\)-[^-]\+/\1/p')
 export PYBUILD_NAME=livereload
-export ROOT_PATH=$(CURDIR)
 
 
 %:
