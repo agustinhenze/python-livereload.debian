@@ -3,6 +3,7 @@ Section: python
 Priority: optional
 Maintainer: Agustin Henze <tin@debian.org>
 Build-Depends: debhelper (>= 9),
+ dh-python,
  python-all,
  python-setuptools,
  python3-all,
