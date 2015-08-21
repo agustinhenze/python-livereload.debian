@@ -5,20 +5,20 @@
 
     HTTP and WebSocket handlers for livereload.
 
-    :copyright: (c) 2013 by Hsiaoming Yang
+    :copyright: (c) 2013 - 2015 by Hsiaoming Yang
 """
 
 import os
 import time
-import hashlib
 import logging
-import mimetypes
+from pkg_resources import resource_string
+from tornado import web
 from tornado import ioloop
 from tornado import escape
 from tornado.websocket import WebSocketHandler
-from tornado.web import RequestHandler
 from tornado.util import ObjectDict
-from ._compat import to_bytes
+
+logger = logging.getLogger('livereload')
 
 
 class LiveReloadHandler(WebSocketHandler):
@@ -43,37 +43,71 @@ class LiveReloadHandler(WebSocketHandler):
         try:
             self.write_message(message)
         except:
-            logging.error('Error sending message', exc_info=True)
+            logger.error('Error sending message', exc_info=True)
 
-    def poll_tasks(self):
-        filepath = self.watcher.examine()
-        if not filepath:
+    @classmethod
+    def start_tasks(cls):
+        if cls._last_reload_time:
             return
-        logging.info('File %s changed', filepath)
-        self.watch_tasks()
 
-    def watch_tasks(self):
-        if time.time() - self._last_reload_time < 3:
+        if not cls.watcher._tasks:
+            logger.info('Watch current working directory')
+            cls.watcher.watch(os.getcwd())
+
+        cls._last_reload_time = time.time()
+        logger.info('Start watching changes')
+        if not cls.watcher.start(cls.poll_tasks):
+            logger.info('Start detecting changes')
+            ioloop.PeriodicCallback(cls.poll_tasks, 800).start()
+
+    @classmethod
+    def poll_tasks(cls):
+        filepath, delay = cls.watcher.examine()
+        if not filepath or delay == 'forever' or not cls.waiters:
+            return
+        reload_time = 3
+
+        if delay:
+            reload_time = max(3 - delay, 1)
+        if filepath == '__livereload__':
+            reload_time = 0
+
+        if time.time() - cls._last_reload_time < reload_time:
             # if you changed lot of files in one time
             # it will refresh too many times
-            logging.info('ignore this reload action')
+            logger.info('Ignore: %s', filepath)
             return
+        if delay:
+            loop = ioloop.IOLoop.current()
+            loop.call_later(delay, cls.reload_waiters)
+        else:
+            cls.reload_waiters()
 
-        logging.info('Reload %s waiters', len(self.waiters))
+    @classmethod
+    def reload_waiters(cls, path=None):
+        logger.info(
+            'Reload %s waiters: %s',
+            len(cls.waiters),
+            cls.watcher.filepath,
+        )
+
+        if path is None:
+            path = cls.watcher.filepath or '*'
 
         msg = {
             'command': 'reload',
-            'path': self.watcher.filepath or '*',
-            'liveCSS': True
+            'path': path,
+            'liveCSS': True,
+            'liveImg': True,
         }
 
-        self._last_reload_time = time.time()
-        for waiter in LiveReloadHandler.waiters:
+        cls._last_reload_time = time.time()
+        for waiter in cls.waiters:
             try:
                 waiter.write_message(msg)
             except:
-                logging.error('Error sending message', exc_info=True)
-                LiveReloadHandler.waiters.remove(waiter)
+                logger.error('Error sending message', exc_info=True)
+                cls.waiters.remove(waiter)
 
     def on_message(self, message):
         """Handshake with livereload.js
@@ -81,136 +115,37 @@ class LiveReloadHandler(WebSocketHandler):
         1. client send 'hello'
         2. server reply 'hello'
         3. client send 'info'
-
-        http://feedback.livereload.com/knowledgebase/articles/86174-livereload-protocol
         """
         message = ObjectDict(escape.json_decode(message))
         if message.command == 'hello':
-            handshake = {}
-            handshake['command'] = 'hello'
-            handshake['protocols'] = [
-                'http://livereload.com/protocols/official-7',
-                'http://livereload.com/protocols/official-8',
-                'http://livereload.com/protocols/official-9',
-                'http://livereload.com/protocols/2.x-origin-version-negotiation',
-                'http://livereload.com/protocols/2.x-remote-control'
-            ]
-            handshake['serverName'] = 'livereload-tornado'
+            handshake = {
+                'command': 'hello',
+                'protocols': [
+                    'http://livereload.com/protocols/official-7',
+                ],
+                'serverName': 'livereload-tornado',
+            }
             self.send_message(handshake)
 
         if message.command == 'info' and 'url' in message:
-            logging.info('Browser Connected: %s' % message.url)
+            logger.info('Browser Connected: %s' % message.url)
             LiveReloadHandler.waiters.add(self)
 
-            if not LiveReloadHandler._last_reload_time:
-                if not self.watcher._tasks:
-                    logging.info('Watch current working directory')
-                    self.watcher.watch(os.getcwd())
 
-                LiveReloadHandler._last_reload_time = time.time()
-                logging.info('Start watching changes')
-                if not self.watcher.start(self.poll_tasks):
-                    ioloop.PeriodicCallback(self.poll_tasks, 800).start()
-
-
-class LiveReloadJSHandler(RequestHandler):
-    def initialize(self, port):
-        self._port = port
+class LiveReloadJSHandler(web.RequestHandler):
 
     def get(self):
-        js = os.path.join(
-            os.path.abspath(os.path.dirname(__file__)), 'livereload.js',
-        )
         self.set_header('Content-Type', 'application/javascript')
-        with open(js, 'r') as f:
-            content = f.read()
-            content = content.replace('{{port}}', str(self._port))
-            self.write(content)
+        self.write(resource_string(__name__, 'vendors/livereload.js'))
 
 
-class ForceReloadHandler(RequestHandler):
+class ForceReloadHandler(web.RequestHandler):
     def get(self):
-        msg = {
-            'command': 'reload',
-            'path': self.get_argument('path', default=None) or '*',
-            'liveCSS': True,
-            'liveImg': True
-        }
-        for waiter in LiveReloadHandler.waiters:
-            try:
-                waiter.write_message(msg)
-            except:
-                logging.error('Error sending message', exc_info=True)
-                LiveReloadHandler.waiters.remove(waiter)
+        path = self.get_argument('path', default=None) or '*'
+        LiveReloadHandler.reload_waiters(path)
         self.write('ok')
 
 
-class StaticHandler(RequestHandler):
-    def initialize(self, root, fallback=None):
-        self._root = os.path.abspath(root)
-        self._fallback = fallback
-
-    def filepath(self, url):
-        url = url.lstrip('/')
-        url = os.path.join(self._root, url)
-
-        if url.endswith('/'):
-            url += 'index.html'
-        elif not os.path.exists(url) and not url.endswith('.html'):
-            url += '.html'
-
-        if not os.path.isfile(url):
-            return None
-        return url
-
-    def get(self, path='/'):
-        filepath = self.filepath(path)
-        if not filepath and path.endswith('/'):
-            rootdir = os.path.join(self._root, path.lstrip('/'))
-            return self.create_index(rootdir)
-
-        if not filepath:
-            if self._fallback:
-                self._fallback(self.request)
-                self._finished = True
-                return
-            return self.send_error(404)
-
-        mime_type, encoding = mimetypes.guess_type(filepath)
-        if not mime_type:
-            mime_type = 'text/html'
-
-        self.mime_type = mime_type
-        self.set_header('Content-Type', mime_type)
-
-        if mime_type.startswith('text'):
-            with open(filepath, 'r') as f:
-                data = f.read()
-        else:
-            with open(filepath, 'rb') as f:
-                data = f.read()
-
-        hasher = hashlib.sha1()
-        hasher.update(to_bytes(data))
-        self.set_header('Etag', '"%s"' % hasher.hexdigest())
-
-        ua = self.request.headers.get('User-Agent', 'bot').lower()
-        if mime_type == 'text/html' and 'msie' not in ua:
-            data = data.replace(
-                '</head>',
-                '<script src="/livereload.js"></script></head>'
-            )
-        self.write(data)
-
-    def create_index(self, root):
-        files = os.listdir(root)
-        self.write('<ul>')
-        for f in files:
-            path = os.path.join(root, f)
-            self.write('<li>')
-            if os.path.isdir(path):
-                self.write('<a href="%s/">%s</a>' % (f, f))
-            else:
-                self.write('<a href="%s">%s</a>' % (f, f))
-            self.write('</li>')
-        self.write('</ul>')
+class StaticFileHandler(web.StaticFileHandler):
+    def should_return_304(self):
+        return False
