@@ -12,7 +12,7 @@ def fread(filepath):
 
 def version():
     content = fread('livereload/__init__.py')
-    pattern = r"__version__ = '([0-9\.]*)'"
+    pattern = r"__version__ = '([0-9\.dev]*)'"
     m = re.findall(pattern, content)
     return m[0]
 
@@ -26,11 +26,14 @@ setup(
     packages=['livereload'],
     description='Python LiveReload is an awesome tool for web developers',
     long_description=fread('README.rst'),
-    scripts=[
-        'bin/livereload',
-    ],
+    entry_points={
+        'console_scripts': [
+            'livereload = livereload.cli:main',
+        ]
+    },
     install_requires=[
         'tornado',
+        'six',
     ],
     license='BSD',
     include_package_data=True,
@@ -46,6 +49,7 @@ setup(
         'Programming Language :: Python :: 2.6',
         'Programming Language :: Python :: 2.7',
         'Programming Language :: Python :: 3.3',
+        'Programming Language :: Python :: 3.4',
         'Programming Language :: Python :: Implementation :: CPython',
         'Programming Language :: Python :: Implementation :: PyPy',
         'Topic :: Software Development :: Build Tools',

@@ -5,12 +5,16 @@
 
     A file watch management for LiveReload Server.
 
-    :copyright: (c) 2013 by Hsiaoming Yang
+    :copyright: (c) 2013 - 2015 by Hsiaoming Yang
 """
 
 import os
 import glob
 import time
+try:
+    import pyinotify
+except ImportError:
+    pyinotify = None
 
 
 class Watcher(object):
@@ -18,6 +22,9 @@ class Watcher(object):
     def __init__(self):
         self._tasks = {}
         self._mtimes = {}
+
+        # setting changes
+        self._changes = []
 
         # filepath that is changed
         self.filepath = None
@@ -28,38 +35,66 @@ class Watcher(object):
         _, ext = os.path.splitext(filename)
         return ext in ['.pyc', '.pyo', '.o', '.swp']
 
-    def watch(self, path, func=None):
-        """Add a task to watcher."""
-        self._tasks[path] = func
+    def watch(self, path, func=None, delay=0, ignore=None):
+        """Add a task to watcher.
+
+        :param path: a filepath or directory path or glob pattern
+        :param func: the function to be executed when file changed
+        :param delay: Delay sending the reload message. Use 'forever' to
+                      not send it. This is useful to compile sass files to
+                      css, but reload on changed css files then only.
+        :param ignore: A function return True to ignore a certain pattern of
+                       filepath.
+        """
+        self._tasks[path] = {
+            'func': func,
+            'delay': delay,
+            'ignore': ignore,
+        }
 
     def start(self, callback):
-        """Start the watcher running, calling callback when changes are observed. If this returns False,
-        regular polling will be used."""
+        """Start the watcher running, calling callback when changes are
+        observed. If this returns False, regular polling will be used."""
         return False
 
     def examine(self):
         """Check if there are changes, if true, run the given task."""
+        if self._changes:
+            return self._changes.pop()
+
         # clean filepath
         self.filepath = None
+        delays = set()
         for path in self._tasks:
-            if self.is_changed(path):
-                func = self._tasks[path]
-                # run function
+            item = self._tasks[path]
+            if self.is_changed(path, item['ignore']):
+                func = item['func']
                 func and func()
-        return self.filepath
+                delay = item['delay']
+                if delay and isinstance(delay, int):
+                    delays.add(delay)
 
-    def is_changed(self, path):
+        if delays:
+            delay = max(delays)
+        else:
+            delay = None
+        return self.filepath, delay
+
+    def is_changed(self, path, ignore=None):
         if os.path.isfile(path):
-            return self.is_file_changed(path)
+            return self.is_file_changed(path, ignore)
         elif os.path.isdir(path):
-            return self.is_folder_changed(path)
-        return self.is_glob_changed(path)
+            return self.is_folder_changed(path, ignore)
+        return self.is_glob_changed(path, ignore)
 
-    def is_file_changed(self, path):
+    def is_file_changed(self, path, ignore=None):
         if not os.path.isfile(path):
             return False
 
         if self.ignore(path):
+            return False
+
+        if ignore and ignore(path):
             return False
 
         mtime = os.path.getmtime(path)
@@ -77,7 +112,7 @@ class Watcher(object):
         self._mtimes[path] = mtime
         return False
 
-    def is_folder_changed(self, path):
+    def is_folder_changed(self, path, ignore=None):
         for root, dirs, files in os.walk(path, followlinks=True):
             if '.git' in dirs:
                 dirs.remove('.git')
@@ -89,13 +124,13 @@ class Watcher(object):
                 dirs.remove('.cvs')
 
             for f in files:
-                if self.is_file_changed(os.path.join(root, f)):
+                if self.is_file_changed(os.path.join(root, f), ignore):
                     return True
         return False
 
-    def is_glob_changed(self, path):
+    def is_glob_changed(self, path, ignore=None):
         for f in glob.glob(path):
-            if self.is_file_changed(f):
+            if self.is_file_changed(f, ignore):
                 return True
         return False
 
@@ -104,16 +139,14 @@ class INotifyWatcher(Watcher):
     def __init__(self):
         Watcher.__init__(self)
 
-        import pyinotify
         self.wm = pyinotify.WatchManager()
         self.notifier = None
         self.callback = None
 
-    def watch(self, path, func=None):
-        import pyinotify
+    def watch(self, path, func=None, delay=None, ignore=None):
         flag = pyinotify.IN_CREATE | pyinotify.IN_DELETE | pyinotify.IN_MODIFY
         self.wm.add_watch(path, flag, rec=True, do_glob=True, auto_add=True)
-        Watcher.watch(self, path, func)
+        Watcher.watch(self, path, func, delay, ignore)
 
     def inotify_event(self, event):
         self.callback()
@@ -122,7 +155,6 @@ class INotifyWatcher(Watcher):
         if not self.notifier:
             self.callback = callback
 
-            import pyinotify
             from tornado import ioloop
             self.notifier = pyinotify.TornadoAsyncNotifier(
                 self.wm, ioloop.IOLoop.instance(),
@@ -130,3 +162,9 @@ class INotifyWatcher(Watcher):
             )
             callback()
         return True
+
+
+def get_watcher_class():
+    if pyinotify is None:
+        return Watcher
+    return INotifyWatcher
